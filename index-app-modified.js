@@ -71,7 +71,7 @@ async function connectToWhatsApp(method = 'qr', phoneNumber = '') {
             browser: ["Windows", "Chrome", "110.0.5481.100"]
         });
 
-        if (method === 'pairing_code' && phoneNumber && !sock.authState.creds.me) {
+        if (method === 'pairing_code' && phoneNumber) {
             // Attendre un court instant avant de demander le code d'association
             setTimeout(async () => {
                 try {
@@ -79,10 +79,12 @@ async function connectToWhatsApp(method = 'qr', phoneNumber = '') {
                     let code = await sock.requestPairingCode(phoneNumber);
                     pairingCode = code?.match(/.{1,4}/g)?.join("-") || code;
                     console.log("[BOT] Code d'association généré :", pairingCode);
+                    console.log("[BOT] Pairing code stocké dans la variable globale");
                 } catch (err) {
                     console.error("[BOT] Erreur lors de la demande de code d'association :", err);
+                    pairingCode = null;
                 }
-            }, 3000);
+            }, 2000);
         }
 
         sock.ev.on('connection.update', async (update) => {
@@ -95,6 +97,18 @@ async function connectToWhatsApp(method = 'qr', phoneNumber = '') {
                     console.log('[BOT] Nouveau code QR généré.');
                 } catch (err) {
                     console.error("[BOT] Erreur de génération du code QR Base64 :", err);
+                }
+            }
+
+            // Demander le pairing code si la méthode est pairing_code et pas encore généré
+            if (method === 'pairing_code' && phoneNumber && !pairingCode && connection !== 'close') {
+                try {
+                    console.log(`[BOT] Demande du code d'association via connection.update pour : ${phoneNumber}`);
+                    let code = await sock.requestPairingCode(phoneNumber);
+                    pairingCode = code?.match(/.{1,4}/g)?.join("-") || code;
+                    console.log("[BOT] Code d'association généré via connection.update :", pairingCode);
+                } catch (err) {
+                    console.error("[BOT] Erreur lors de la demande du pairing code :", err);
                 }
             }
 
@@ -142,6 +156,46 @@ async function connectToWhatsApp(method = 'qr', phoneNumber = '') {
         });
 
         sock.ev.on('creds.update', saveCreds);
+
+        // Handle incoming messages
+        sock.ev.on('messages.upsert', async (m) => {
+            console.log('[BOT] Nouveaux messages reçus');
+            
+            for (const msg of m.messages) {
+                try {
+                    if (!msg.message) continue; // Ignore les messages vides
+                    
+                    const text = msg.message.conversation || msg.message.extendedTextMessage?.text || '';
+                    if (!text) continue;
+                    
+                    const sender = msg.key.remoteJid;
+                    const isFromMe = msg.key.fromMe;
+                    
+                    if (isFromMe) continue; // Ignore nos propres messages
+                    
+                    console.log(`[BOT] Message de ${sender}: ${text}`);
+                    
+                    // Parse commands
+                    if (text.startsWith('.ping')) {
+                        console.log(`[BOT] Commande .ping reçue de ${sender}`);
+                        await sock.sendMessage(sender, { text: '🤖 Bot est actif et connecté! Pong! ✅' });
+                    } else if (text.startsWith('.creneau')) {
+                        const parts = text.split(' ');
+                        if (parts.length === 2 && /^\d{2}:\d{2}$/.test(parts[1])) {
+                            botConfig.cronTime = parts[1];
+                            saveConfig();
+                            setupCron();
+                            console.log(`[BOT] Créneau changé à ${botConfig.cronTime} par ${sender}`);
+                            await sock.sendMessage(sender, { text: `✅ Créneau d'envoi changé à ${botConfig.cronTime}` });
+                        } else {
+                            await sock.sendMessage(sender, { text: '❌ Format invalide. Utilisez: .creneau HH:mm\nExemple: .creneau 15:00' });
+                        }
+                    }
+                } catch (err) {
+                    console.error('[BOT] Erreur lors du traitement du message:', err);
+                }
+            }
+        });
 
     } catch (error) {
         console.error("[BOT] Erreur critique lors de l'initialisation de la connexion :", error);
