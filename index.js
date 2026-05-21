@@ -267,6 +267,20 @@ const ORDER_STATUS_LABELS = {
     cancelled: 'Annulée',
 };
 
+const PAYMENT_STATUS_LABELS = {
+    pending: 'En attente',
+    paid: 'Payé',
+};
+
+const PAYMENT_STATUS_ALIASES = {
+    attente: 'pending',
+    pending: 'pending',
+    impaye: 'pending',
+    paye: 'paid',
+    payee: 'paid',
+    paid: 'paid',
+};
+
 const ORDER_STATUS_ALIASES = {
     attente: 'pending',
     en_attente: 'pending',
@@ -299,6 +313,7 @@ function getMenuText() {
         '• `.commandes active` — En cours (attente + prépa + prête)',
         '• `.commande REF` — Détail d\'une commande',
         '• `.statut REF prep` — Changer le statut (attente/prep/pret/livre/annule)',
+        '• `.paiement REF paye` — Changer le paiement (attente/paye)',
         '• `.avancer REF` — Passer au statut suivant',
         '• `.ventes` — CA et stats du jour (Maroc)',
         '• `.demandes` — Demandes compte pro en attente',
@@ -317,7 +332,7 @@ function getMenuText() {
         '• `.authorise NUMERO` — Autoriser un admin',
         '• `.unauthorise NUMERO` — Retirer l\'autorisation',
         '',
-        '*Notifications auto :* nouvelles commandes · demandes pro',
+        '*Notifications auto :* nouvelles commandes pro · demandes compte pro',
         '',
         '*Exemples :*',
         '`.commande ord_2026_0042`',
@@ -446,7 +461,23 @@ function parseOrderStatusInput(raw) {
 }
 
 function statusLabel(status) {
-    return ORDER_STATUS_LABELS[status] || status;
+    return ORDER_STATUS_LABELS[status] || status || 'Inconnu';
+}
+
+function paymentLabel(payment) {
+    return PAYMENT_STATUS_LABELS[payment] || payment || 'Inconnu';
+}
+
+function parsePaymentStatusInput(raw) {
+    if (!raw) return null;
+    const key = raw.toLowerCase().replace(/é/g, 'e').replace(/è/g, 'e');
+    return PAYMENT_STATUS_ALIASES[key] || null;
+}
+
+/** Retire backticks / ponctuation WhatsApp autour de la référence commande. */
+function sanitizeOrderRef(raw) {
+    if (!raw) return '';
+    return String(raw).replace(/^[`'"]+|[`'".:,;]+$/g, '').trim();
 }
 
 function formatOrdersList(data) {
@@ -475,12 +506,15 @@ function formatOrdersList(data) {
 
 function formatOrderDetail(data) {
     const o = data.order;
+    const clientLine = o.customerLabel
+        ? `*Client pro :* ${o.customerLabel}`
+        : `*Client :* ${o.customer_type}`;
     const lines = [
         `📦 *Commande ${o.reference}*`,
         '',
-        `Statut : *${statusLabel(o.status)}*`,
-        `Paiement : ${o.payment}`,
-        `Client : ${o.customer_type}${o.customerLabel ? ` — ${o.customerLabel}` : ''}`,
+        `*Statut :* ${statusLabel(o.status)}`,
+        `*Paiement :* ${paymentLabel(o.payment)}`,
+        clientLine,
         `Total : *${o.total_mad} MAD*`,
         `Date : ${new Date(o.created_at).toLocaleString('fr-MA', { timeZone: 'Africa/Casablanca' })}`,
         '',
@@ -546,14 +580,17 @@ function formatProRequestsList(data) {
     return lines.join('\n');
 }
 
-async function sendMenu(jid) {
-    const caption = getMenuText();
-    const logo = await getMenuLogoBuffer();
-    if (logo) {
-        await sock.sendMessage(jid, { image: logo, caption });
+async function sendTextWithLogo(jid, text, logo = null) {
+    const img = logo ?? (await getMenuLogoBuffer());
+    if (img) {
+        await sock.sendMessage(jid, { image: img, caption: text });
     } else {
-        await sock.sendMessage(jid, { text: caption });
+        await sock.sendMessage(jid, { text });
     }
+}
+
+async function sendMenu(jid) {
+    await sendTextWithLogo(jid, getMenuText());
 }
 
 function parseCommandPhone(text, commandBase) {
@@ -635,7 +672,7 @@ async function handleIncomingMessages(m) {
 
             if (!isCommand) continue;
 
-            const cmd = cleanText.split(/\s+/)[0].replace(/[(:].*$/, '');
+            const cmd = cleanText.split(/\s+/)[0].split('(')[0].split(':')[0];
 
             if (cmd === '.menu') {
                 await sendMenu(sender);
@@ -717,13 +754,46 @@ async function handleIncomingMessages(m) {
                     });
                     continue;
                 }
+                const orderRef = sanitizeOrderRef(refMatch[1]);
                 try {
-                    const data = await fetchShop('order', { reference: refMatch[1] });
+                    const data = await fetchShop('order', { reference: orderRef });
                     await sendLongMessage(sender, formatOrderDetail(data));
                 } catch (err) {
                     const msg = err.message === 'not_found'
                         ? '❌ Commande introuvable.'
                         : '❌ Impossible de récupérer la commande.';
+                    await sock.sendMessage(sender, { text: msg });
+                }
+            } else if (cmd === '.paiement' || cmd === '.payment') {
+                const payMatch = text.trim().match(/^\.(?:paiement|payment)\s+(\S+)\s+(\S+)/i);
+                if (!payMatch) {
+                    await sock.sendMessage(sender, {
+                        text: '❌ Format: `.paiement REF paye`\nValeurs: attente, paye',
+                    });
+                    continue;
+                }
+                const [, reference, paymentRaw] = payMatch;
+                const payment = parsePaymentStatusInput(paymentRaw);
+                if (!payment) {
+                    await sock.sendMessage(sender, {
+                        text: '❌ Paiement invalide. Utilisez: attente, paye',
+                    });
+                    continue;
+                }
+                try {
+                    const result = await patchShop({
+                        action: 'set-payment',
+                        reference: sanitizeOrderRef(reference),
+                        payment,
+                    });
+                    const note = result.unchanged ? ' (déjà à ce statut)' : '';
+                    await sock.sendMessage(sender, {
+                        text: `✅ *${sanitizeOrderRef(reference)}*\n${paymentLabel(result.previousPayment)} → *${paymentLabel(result.payment)}*${note}`,
+                    });
+                } catch (err) {
+                    const msg = err.message === 'not_found'
+                        ? '❌ Commande introuvable.'
+                        : '❌ Impossible de mettre à jour le paiement.';
                     await sock.sendMessage(sender, { text: msg });
                 }
             } else if (cmd === '.statut' || cmd === '.status') {
@@ -743,7 +813,7 @@ async function handleIncomingMessages(m) {
                     continue;
                 }
                 try {
-                    const result = await patchShop({ action: 'set-status', reference, status });
+                    const result = await patchShop({ action: 'set-status', reference: sanitizeOrderRef(reference), status });
                     const note = result.unchanged ? ' (déjà à ce statut)' : '';
                     await sock.sendMessage(sender, {
                         text: `✅ *${reference}*\n${statusLabel(result.previousStatus)} → *${statusLabel(result.status)}*${note}`,
@@ -761,7 +831,7 @@ async function handleIncomingMessages(m) {
                     continue;
                 }
                 try {
-                    const result = await patchShop({ action: 'advance', reference: advMatch[1] });
+                    const result = await patchShop({ action: 'advance', reference: sanitizeOrderRef(advMatch[1]) });
                     const note = result.unchanged ? '\nℹ️ Déjà au statut final du flux.' : '';
                     await sock.sendMessage(sender, {
                         text: `✅ *${result.reference}*\n${statusLabel(result.previousStatus)} → *${statusLabel(result.status)}*${note}`,
@@ -809,17 +879,21 @@ async function handleIncomingMessages(m) {
             } else if (cleanText.startsWith('.ping')) {
                 await sock.sendMessage(sender, { text: '🤖 Bot est actif et connecté! Pong! ✅' });
                 console.log(`[BOT] Réponse .ping envoyée à ${sender}`);
-            } else if (cleanText.startsWith('.creneau')) {
-                const parts = text.trim().split(' ');
-                if (parts.length === 2 && /^\d{2}:\d{2}$/.test(parts[1])) {
-                    botConfig.cronTime = parts[1];
+            } else if (cmd === '.creneau') {
+                const timeMatch = text.trim().match(/\.creneau\s*:?\s*(\d{1,2}:\d{2})/i);
+                if (timeMatch) {
+                    const [, h, m] = timeMatch[1].match(/^(\d{1,2}):(\d{2})$/) || [];
+                    const normalized = `${h.padStart(2, '0')}:${m}`;
+                    botConfig.cronTime = normalized;
                     saveConfig();
                     setupCron();
                     await sock.sendMessage(sender, {
                         text: `✅ Créneau d'envoi : ${botConfig.cronTime} (heure du Maroc — ${CRON_TIMEZONE})`,
                     });
                 } else {
-                    await sock.sendMessage(sender, { text: '❌ Format invalide. Utilisez: .creneau HH:mm\nExemple: .creneau 15:00' });
+                    await sock.sendMessage(sender, {
+                        text: `❌ Format invalide. Utilisez: .creneau HH:mm\nExemple: .creneau 15:00\nActuel : ${botConfig.cronTime}`,
+                    });
                 }
             } else if (cleanText === '.pro') {
                 try {
@@ -1123,6 +1197,11 @@ function setupCron() {
 
             console.log(`[CRON] Found ${pros.length} active pros to message.`);
 
+            const logo = await getMenuLogoBuffer();
+            if (!logo) {
+                console.warn('[CRON] Logo NYC introuvable — envoi texte seul.');
+            }
+
             for (const pro of pros) {
                 if (!pro.phone) continue;
 
@@ -1130,7 +1209,7 @@ function setupCron() {
                 const jid = `${cleanNumber}@s.whatsapp.net`;
                 const message = `Bonjour ${pro.contact_name},\n\nC'est l'heure de commander vos NYC Cookies pour demain ! 🍪\n\nPassez commande directement sur votre espace pro :\n${SITE_URL}/pro/dashboard\n\nMerci et bonne soirée !`;
 
-                await sock.sendMessage(jid, { text: message });
+                await sendTextWithLogo(jid, message, logo);
                 console.log(`[CRON] Sent message to ${pro.company} (${pro.phone})`);
 
                 await new Promise(resolve => setTimeout(resolve, 2000));
