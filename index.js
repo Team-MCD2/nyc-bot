@@ -281,6 +281,16 @@ const PAYMENT_STATUS_ALIASES = {
     paid: 'paid',
 };
 
+const INVOICE_STATUS_LABELS = {
+    upcoming: 'À payer',
+    paid: 'Payée',
+    overdue: 'En retard',
+};
+
+function invoiceStatusLabel(status) {
+    return INVOICE_STATUS_LABELS[status] || status || 'Inconnu';
+}
+
 const ORDER_STATUS_ALIASES = {
     attente: 'pending',
     en_attente: 'pending',
@@ -299,44 +309,110 @@ const ORDER_STATUS_ALIASES = {
     cancelled: 'cancelled',
 };
 
+/** Commandes reconnues par le bot — tout le reste (ex. `.musique`) est ignoré. */
+const BOT_COMMANDS = new Set([
+    '.menu',
+    '.guide', '.aide', '.help',
+    '.authorise', '.authorize', '.autorise',
+    '.unauthorise', '.unauthorize', '.unautorise',
+    '.update',
+    '.commandes', '.orders',
+    '.commande', '.order',
+    '.paiement', '.payment',
+    '.statut', '.status',
+    '.avancer', '.advance',
+    '.stock', '.stocks',
+    '.produits', '.products',
+    '.ventes', '.ca', '.stats',
+    '.demandes', '.demandespro',
+    '.ping',
+    '.creneau',
+    '.pro',
+    '.prosend',
+]);
+
+function isKnownBotCommand(cleanText, cmd) {
+    if (BOT_COMMANDS.has(cmd)) return true;
+    const prefixes = [
+        '.authorise', '.authorize', '.autorise',
+        '.unauthorise', '.unauthorize', '.unautorise',
+        '.prosend',
+        '.ping',
+    ];
+    return prefixes.some((p) => cleanText.startsWith(p));
+}
+
 function getMenuText() {
     return [
-        '🍪 *NYC Cookies — Bot WhatsApp*',
+        '🍪 *NYC Cookies — Commandes*',
         '',
         '*Général*',
-        '• `.menu` — Ce menu',
+        '`.menu`',
+        '`.guide`',
+        '`.ping`',
+        '`.update`',
+        '',
+        '*Boutique — commandes*',
+        '`.commandes`',
+        '`.commande`',
+        '`.statut`',
+        '`.paiement`',
+        '`.avancer`',
+        '`.ventes`',
+        '`.demandes`',
+        '',
+        '*Boutique — catalogue*',
+        '`.stock`',
+        '`.produits`',
+        '',
+        '*Clients pro*',
+        '`.pro`',
+        '`.prosend`',
+        '`.creneau`',
+        '',
+        '*Administration*',
+        '`.authorise`',
+        '`.unauthorise`',
+    ].join('\n');
+}
+
+function getGuideText() {
+    return [
+        '📖 *Guide des commandes — NYC Cookies*',
+        '',
+        '*Général*',
+        '• `.menu` — Menu court (accueil)',
+        '• `.guide` — Ce guide',
         '• `.ping` — Tester la connexion',
-        '• `.update` — Résumé admin (commandes, pros, factures)',
+        '• `.update` — Résumé admin (commandes, factures, demandes pro)',
         '',
         '*Boutique — commandes*',
         '• `.commandes` — En attente (défaut)',
         '• `.commandes active` — En cours (attente + prépa + prête)',
         '• `.commande REF` — Détail d\'une commande',
-        '• `.statut REF prep` — Changer le statut (attente/prep/pret/livre/annule)',
-        '• `.paiement REF paye` — Changer le paiement (attente/paye)',
-        '• `.avancer REF` — Passer au statut suivant',
+        '• `.statut REF prep` — Statut (attente/prep/pret/livre/annule)',
+        '• `.paiement REF paye` — Paiement (+ facture liée)',
+        '• `.avancer REF` — Statut suivant',
         '• `.ventes` — CA et stats du jour (Maroc)',
         '• `.demandes` — Demandes compte pro en attente',
         '',
         '*Boutique — catalogue*',
-        '• `.stock` — Produits en stock bas (seuil 15)',
-        '• `.stock 5` — Stock bas avec seuil personnalisé',
-        '• `.produits` — Liste des produits actifs',
+        '• `.stock` — Stock bas (seuil 15)',
+        '• `.stock 5` — Stock bas (seuil personnalisé)',
+        '• `.produits` — Produits actifs',
         '',
         '*Clients pro*',
-        '• `.pro` — Liste des pros (numéros)',
-        '• `.prosend NUMERO : Message` — Message personnalisé',
+        '• `.pro` — Liste des pros',
+        '• `.prosend NUMERO : Message` — Message à un pro',
         `• \`.creneau HH:mm\` — Rappels auto (${CRON_TIMEZONE})`,
         '',
         '*Administration*',
-        '• `.authorise NUMERO` — Autoriser un admin',
-        '• `.unauthorise NUMERO` — Retirer l\'autorisation',
+        '• `.authorise NUMERO` — Autoriser un numéro',
+        '• `.unauthorise NUMERO` — Retirer un numéro',
         '',
-        '*Notifications auto :* nouvelles commandes pro · demandes compte pro',
-        '',
-        '*Exemples :*',
-        '`.commande ord_2026_0042`',
-        '`.statut ord_2026_0042 pret`',
+        '*Exemples*',
+        '`.commande ord_2026_0001`',
+        '`.paiement ord_2026_0001 paye`',
         '`.prosend 212612345678 : Bonjour !`',
     ].join('\n');
 }
@@ -381,13 +457,14 @@ async function notifyAllAdmins(message) {
 }
 
 function formatAdminSummary(data) {
+    const unpaidCount = data.unpaidInvoicesCount ?? data.pendingInvoicesCount ?? 0;
     const lines = [
         '📊 *NYC Cookies — Mise à jour admin*',
         '',
         `🛒 Commandes en attente : *${data.pendingOrdersCount ?? 0}*`,
         `💼 Demandes Pro en attente : *${data.pendingProRequestsCount ?? 0}*`,
         `📦 Commandes aujourd'hui : *${data.ordersTodayCount ?? 0}*`,
-        `🧾 Factures impayées : *${data.pendingInvoicesCount ?? 0}*`,
+        `🧾 Factures à payer : *${unpaidCount}*`,
         `⏰ Rappels pros : *${botConfig.cronTime}* (${CRON_TIMEZONE})`,
         '',
     ];
@@ -400,6 +477,14 @@ function formatAdminSummary(data) {
         lines.push('');
     }
 
+    if (data.unpaidInvoices?.length) {
+        lines.push('*Factures encore à payer :*');
+        data.unpaidInvoices.forEach((inv) => {
+            lines.push(`• ${inv.reference} — ${inv.amount_mad} MAD (${invoiceStatusLabel(inv.status)})`);
+        });
+        lines.push('');
+    }
+
     if (data.pendingProRequests?.length) {
         lines.push('*Demandes Pro récentes :*');
         data.pendingProRequests.slice(0, 5).forEach((r) => {
@@ -408,7 +493,7 @@ function formatAdminSummary(data) {
         lines.push('');
     }
 
-    lines.push(`🔗 Admin : ${data.siteUrl}/admin`);
+    lines.push(`🔗 Admin : ${data.siteUrl}/admin/dashboard`);
     return lines.join('\n');
 }
 
@@ -497,7 +582,7 @@ function formatOrdersList(data) {
         });
         lines.push(
             `• *${o.reference}* — ${o.total_mad} MAD`,
-            `  ${statusLabel(o.status)} · ${o.customer_type} · ${date}`,
+            `  ${statusLabel(o.status)} · ${paymentLabel(o.payment)} · ${o.customer_type} · ${date}`,
         );
     });
     lines.push('', '`.commande REF` pour le détail');
@@ -521,7 +606,7 @@ function formatOrderDetail(data) {
         '*Articles :*',
     ];
     o.items.forEach((i) => lines.push(`• ${i.qty}× ${i.name}`));
-    lines.push('', '`.statut REF prep` · `.avancer REF`');
+    lines.push('', '`.statut REF prep` · `.paiement REF paye` · `.avancer REF`');
     return lines.join('\n');
 }
 
@@ -576,7 +661,7 @@ function formatProRequestsList(data) {
     data.requests.forEach((r) => {
         lines.push(`• *${r.company}*`, `  ${r.contact_name} — ${r.phone}`, `  ${r.email || '—'}`);
     });
-    lines.push('', `🔗 ${SITE_URL}/admin/pro-requests`);
+    lines.push('', `🔗 ${SITE_URL}/admin/pros`);
     return lines.join('\n');
 }
 
@@ -591,6 +676,10 @@ async function sendTextWithLogo(jid, text, logo = null) {
 
 async function sendMenu(jid) {
     await sendTextWithLogo(jid, getMenuText());
+}
+
+async function sendGuide(jid) {
+    await sendLongMessage(jid, getGuideText());
 }
 
 function parseCommandPhone(text, commandBase) {
@@ -674,9 +763,23 @@ async function handleIncomingMessages(m) {
 
             const cmd = cleanText.split(/\s+/)[0].split('(')[0].split(':')[0];
 
+            if (!isKnownBotCommand(cleanText, cmd)) continue;
+
             if (cmd === '.menu') {
                 await sendMenu(sender);
                 console.log('[BOT] Menu envoyé');
+                continue;
+            }
+
+            if (cmd === '.guide' || cmd === '.aide' || cmd === '.help') {
+                if (!isSenderAuthorized(msg)) {
+                    await sock.sendMessage(sender, {
+                        text: '⛔ Numéro non autorisé.\nTapez `.menu` pour l\'accueil.',
+                    });
+                    continue;
+                }
+                await sendGuide(sender);
+                console.log('[BOT] Guide envoyé');
                 continue;
             }
 
@@ -685,7 +788,7 @@ async function handleIncomingMessages(m) {
                 const raw = normalizePhone(msg.key.participant || msg.key.remoteJid);
                 console.log(`[BOT] Commande refusée — numéro: ${detected || 'non résolu'} (jid brut: ${raw || 'inconnu'})`);
                 await sock.sendMessage(sender, {
-                    text: '⛔ Numéro non autorisé. Tapez `.menu` pour voir les commandes (si vous êtes admin).',
+                    text: '⛔ Numéro non autorisé.\nTapez `.menu` ou `.guide` (si vous êtes admin).',
                 });
                 continue;
             }
@@ -787,8 +890,12 @@ async function handleIncomingMessages(m) {
                         payment,
                     });
                     const note = result.unchanged ? ' (déjà à ce statut)' : '';
+                    const factureNote =
+                        result.payment === 'paid'
+                            ? '\n🧾 Facture liée : *Payée*'
+                            : '\n🧾 Facture liée : *À payer*';
                     await sock.sendMessage(sender, {
-                        text: `✅ *${sanitizeOrderRef(reference)}*\n${paymentLabel(result.previousPayment)} → *${paymentLabel(result.payment)}*${note}`,
+                        text: `✅ *${sanitizeOrderRef(reference)}*\n${paymentLabel(result.previousPayment)} → *${paymentLabel(result.payment)}*${note}${factureNote}`,
                     });
                 } catch (err) {
                     const msg = err.message === 'not_found'
