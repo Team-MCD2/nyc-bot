@@ -144,11 +144,15 @@ async function connectToWhatsApp(method = 'qr', phoneNumber = '') {
                 isConnected = true;
                 currentQrBase64 = null;
                 pairingCode = null;
+                
+                console.log('[BOT] Socket ID utilisateur:', sock.user?.id);
+                console.log('[BOT] Listeners disponibles:', Object.keys(sock.ev._events || {}));
 
                 // Envoyer un message de confirmation à soi-même pour valider
                 try {
                     const jid = sock.user.id.split(':')[0] + '@s.whatsapp.net';
                     await sock.sendMessage(jid, { text: "Bot NYC Cookies connecté avec succès ! ✅" });
+                    console.log('[BOT] Message de confirmation envoyé');
                 } catch (err) {
                     console.error("[BOT] Impossible d'envoyer le message de confirmation :", err);
                 }
@@ -157,16 +161,40 @@ async function connectToWhatsApp(method = 'qr', phoneNumber = '') {
 
         sock.ev.on('creds.update', saveCreds);
 
-        // Debug: Log all events
-        sock.ev.on('*', async (event) => {
-            if (event[0] !== 'connection.update' && event[0] !== 'creds.update') {
-                console.log('[BOT] Événement reçu:', event[0]);
-            }
+        // Debug: Log ALL events without filtering
+        console.log('[BOT] Configuration du listener universel pour tous les événements...');
+        sock.ev.on('*', (event) => {
+            console.log('[BOT] *** ÉVÉNEMENT REÇU ***:', event);
         });
 
-        // Handle incoming messages
+        // Handle incoming messages - multiple ways to listen
+        console.log('[BOT] Configuration des listeners pour les messages...');
+        
         sock.ev.on('messages.upsert', async (m) => {
-            console.log('[BOT] Event messages.upsert déclenché');
+            console.log('[BOT] ✅ messages.upsert déclenché');
+            await handleMessages(m);
+        });
+
+        sock.ev.on('messages.update', async (m) => {
+            console.log('[BOT] messages.update déclenché');
+        });
+
+        // Fallback for older Baileys versions
+        sock.ev.on('message-new', async (m) => {
+            console.log('[BOT] message-new déclenché');
+            await handleMessages({ messages: [m], type: 'notify' });
+        });
+
+        // Also try to listen for new messages on the socket directly
+        if (sock.socket) {
+            console.log('[BOT] Tentative de listener direct sur sock.socket');
+            sock.socket.on('*', (data) => {
+                console.log('[BOT] Événement sock.socket:', data);
+            });
+        }
+
+        async function handleMessages(m) {
+            console.log('[BOT] handleMessages appelée');
             console.log('[BOT] Type:', m.type);
             console.log('[BOT] Nombre de messages:', m.messages?.length || 0);
             
@@ -177,7 +205,9 @@ async function connectToWhatsApp(method = 'qr', phoneNumber = '') {
             
             for (const msg of m.messages) {
                 try {
-                    console.log('[BOT] Traitement du message:', JSON.stringify(msg.key, null, 2));
+                    console.log('[BOT] === NOUVEAU MESSAGE ===');
+                    console.log('[BOT] Clé du message:', JSON.stringify(msg.key));
+                    console.log('[BOT] Contenu du message:', msg.message);
                     
                     if (!msg.message) {
                         console.log('[BOT] Message vide, skipping');
@@ -188,14 +218,19 @@ async function connectToWhatsApp(method = 'qr', phoneNumber = '') {
                     let text = '';
                     if (msg.message.conversation) {
                         text = msg.message.conversation;
+                        console.log('[BOT] Texte trouvé dans conversation:', text);
                     } else if (msg.message.extendedTextMessage?.text) {
                         text = msg.message.extendedTextMessage.text;
+                        console.log('[BOT] Texte trouvé dans extendedTextMessage:', text);
                     } else if (msg.message.text) {
                         text = msg.message.text;
+                        console.log('[BOT] Texte trouvé dans message.text:', text);
+                    } else {
+                        console.log('[BOT] Types de messages disponibles:', Object.keys(msg.message));
                     }
                     
                     if (!text) {
-                        console.log('[BOT] Pas de texte trouvé');
+                        console.log('[BOT] Pas de texte trouvé dans ce message');
                         continue;
                     }
                     
@@ -209,48 +244,48 @@ async function connectToWhatsApp(method = 'qr', phoneNumber = '') {
                         continue;
                     }
                     
-                    console.log(`[BOT] Message reçu de ${sender}: ${text}`);
+                    console.log(`[BOT] ✅ Message VALIDE reçu de ${sender}: "${text}"`);
                     
                     // Parse commands - trim and lowercase
                     const cleanText = text.trim().toLowerCase();
                     
                     if (cleanText.startsWith('.ping')) {
-                        console.log(`[BOT] Commande .ping détectée de ${sender}`);
+                        console.log(`[BOT] 🎯 Commande .ping détectée de ${sender}`);
                         try {
                             await sock.sendMessage(sender, { text: '🤖 Bot est actif et connecté! Pong! ✅' });
-                            console.log(`[BOT] Réponse .ping envoyée à ${sender}`);
+                            console.log(`[BOT] ✅ Réponse .ping envoyée à ${sender}`);
                         } catch (sendErr) {
-                            console.error(`[BOT] Erreur lors de l'envoi de la réponse .ping:`, sendErr);
+                            console.error(`[BOT] ❌ Erreur lors de l'envoi de la réponse .ping:`, sendErr);
                         }
                     } else if (cleanText.startsWith('.creneau')) {
                         const parts = text.trim().split(' ');
-                        console.log(`[BOT] Commande .creneau détectée, parts:`, parts);
+                        console.log(`[BOT] 🎯 Commande .creneau détectée, parts:`, parts);
                         
                         if (parts.length === 2 && /^\d{2}:\d{2}$/.test(parts[1])) {
                             botConfig.cronTime = parts[1];
                             saveConfig();
                             setupCron();
-                            console.log(`[BOT] Créneau changé à ${botConfig.cronTime} par ${sender}`);
+                            console.log(`[BOT] ✅ Créneau changé à ${botConfig.cronTime} par ${sender}`);
                             try {
                                 await sock.sendMessage(sender, { text: `✅ Créneau d'envoi changé à ${botConfig.cronTime}` });
-                                console.log(`[BOT] Confirmation .creneau envoyée`);
+                                console.log(`[BOT] ✅ Confirmation .creneau envoyée`);
                             } catch (sendErr) {
-                                console.error(`[BOT] Erreur lors de l'envoi de la confirmation .creneau:`, sendErr);
+                                console.error(`[BOT] ❌ Erreur lors de l'envoi de la confirmation .creneau:`, sendErr);
                             }
                         } else {
-                            console.log(`[BOT] Format invalide pour .creneau`);
+                            console.log(`[BOT] ❌ Format invalide pour .creneau`);
                             try {
                                 await sock.sendMessage(sender, { text: '❌ Format invalide. Utilisez: .creneau HH:mm\nExemple: .creneau 15:00' });
                             } catch (sendErr) {
-                                console.error(`[BOT] Erreur lors de l'envoi du message d'erreur:`, sendErr);
+                                console.error(`[BOT] ❌ Erreur lors de l'envoi du message d'erreur:`, sendErr);
                             }
                         }
                     }
                 } catch (err) {
-                    console.error('[BOT] Erreur lors du traitement du message:', err);
+                    console.error('[BOT] ❌ Erreur lors du traitement du message:', err);
                 }
             }
-        });
+        }
 
     } catch (error) {
         console.error("[BOT] Erreur critique lors de l'initialisation de la connexion :", error);
